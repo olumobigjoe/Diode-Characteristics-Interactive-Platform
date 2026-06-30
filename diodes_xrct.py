@@ -24,7 +24,7 @@ def log_user_action(student_id, action_type, details):
         "Details": str(details)
     }])
     if not os.path.isfile(LOG_FILE):
-        log_data.to_csv(log_data, index=False)
+        log_data.to_csv(LOG_FILE, index=False)
     else:
         log_data.to_csv(LOG_FILE, mode='a', header=False, index=False)
 
@@ -38,11 +38,11 @@ if 'quiz_submitted' not in st.session_state:
 if 'saved_score' not in st.session_state:
     st.session_state['saved_score'] = 0
 
-# Base Dataframe logs initialized in clean session memory slots
+# Base Dataframe logs initialized with an explicit 'Unit' tracking dimension
 if 'si_data' not in st.session_state:
-    st.session_state['si_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current (mA)"])
+    st.session_state['si_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current", "Unit"])
 if 'ge_data' not in st.session_state:
-    st.session_state['ge_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current (mA)"])
+    st.session_state['ge_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current", "Unit"])
 
 # --- HEADER ---
 st.title("🔌 Practical: Automated Current Generation in Si and Ge Diode Loop Circuits")
@@ -55,14 +55,14 @@ if not st.session_state['authenticated']:
     matric_no = st.text_input("Student Matriculation Number:")
     if st.button("Initialize Lab Bench"):
         if matric_no.strip() != "":
-            st.session_state['si_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current (mA)"])
-            st.session_state['ge_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current (mA)"])
+            st.session_state['si_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current", "Unit"])
+            st.session_state['ge_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current", "Unit"])
             st.session_state['student_id'] = matric_no.strip()
             st.session_state['authenticated'] = True
             st.session_state['quiz_submitted'] = False 
             st.session_state['saved_score'] = 0
             
-            log_user_action(st.session_state['student_id'], "Session_Start", "Initialized Fresh App Loop Lab Bench.")
+            log_user_action(st.session_state['student_id'], "Session_Start", "Initialized Fresh Auto-Ranging Lab Bench.")
             st.rerun()
         else:
             st.warning("Identification required to track experimental logs.")
@@ -75,7 +75,7 @@ bias_mode = st.sidebar.radio("Select Input Bias Region:", ["Forward Bias Region"
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📥 Automated Data Logger")
-st.sidebar.markdown("*Vary the applied voltage ($0.00\\text{ V}$ to $20.00\\text{ V}$ in steps of $0.10\\text{ V}$). Current output updates automatically in mA.*")
+st.sidebar.markdown("*Vary the applied voltage ($0.00\\text{ V}$ to $20.00\\text{ V}$ in steps of $0.10\\text{ V}$). The ammeter automatically scales between mA and µA.*")
 
 # Strict constraints applied: Voltage bounds set exactly between 0.00 and 20.00 with 0.10 steps
 v_magnitude = st.sidebar.number_input(
@@ -91,7 +91,6 @@ v_magnitude = st.sidebar.number_input(
 v_in = v_magnitude if bias_mode == "Forward Bias Region" else -v_magnitude
 
 # --- LOOP CIRCUIT MATHEMATICAL PHYSICS ENGINE (KVL SOLVER) ---
-# Parameters based exactly on user specifications
 R_series = 500.0  # 500 Ohms limiting resistor
 vt = 0.0259       # Thermal voltage at room temperature
 
@@ -107,11 +106,9 @@ else: # Germanium (Ge)
 def solve_circuit_current(v_source, r_limit, is_sat, eta, vt, v_bd):
     """Numerically determines the exact loop current using a Newton-Raphson framework."""
     if v_source >= 0:
-        # Forward bias loop tracking solution
-        if v_source < 0.2: 
+        if v_source < 0.1: 
             return (is_sat * (np.exp(v_source / (eta * vt)) - 1)) * 1000.0
         
-        # Iterative solver initialization for non-linear exponential intersection
         v_diode = 0.6 if material == "Silicon (Si)" else 0.25
         for _ in range(15):
             f = v_source - v_diode - (is_sat * (np.exp(v_diode / (eta * vt)) - 1) * r_limit)
@@ -124,41 +121,47 @@ def solve_circuit_current(v_source, r_limit, is_sat, eta, vt, v_bd):
         i_loop_ma = (v_source - v_diode) / r_limit * 1000.0
         return max(i_loop_ma, 0.0)
     else:
-        # Reverse bias loop state containing breakdown thresholds
         if v_source <= v_bd:
-            # Avalanche region multiplier modeling
             multiplier = 1.0 / (1.0 - (np.abs(v_source / v_bd) ** 4) + 1e-6)
             multiplier = min(multiplier, 2000.0)
             return (-is_sat * multiplier) * 1000.0
         else:
             return (-is_sat * (1.0 - np.exp(v_source / vt))) * 1000.0
 
-# Execute automatic simulation calculations
-i_generated_ma = solve_circuit_current(v_in, R_series, is_sat, eta, vt, v_breakdown)
+# Base current execution always generated in raw mA units
+i_raw_ma = solve_circuit_current(v_in, R_series, is_sat, eta, vt, v_breakdown)
 
-# Format to strict 2 decimal precision scales
+# --- DYNAMIC AUTO-RANGING SENSE ENGINE ---
+if abs(i_raw_ma) < 0.1:
+    # If smaller than 0.1 mA, auto-switch visualization to microamperes (µA)
+    i_display = round(i_raw_ma * 1000.0, 2)
+    display_unit = "µA"
+else:
+    # Retain standard milliampere scaling representation
+    i_display = round(i_raw_ma, 2)
+    display_unit = "mA"
+
 v_in = round(v_in, 2)
-i_generated_ma = round(i_generated_ma, 2)
 
 st.sidebar.markdown(f"### Generated Output Current:")
-st.sidebar.info(f"**⚡ Loop Current $I$ = {i_generated_ma:.2f} mA**")
+st.sidebar.info(f"**⚡ Loop Current $I$ = {i_display:.2f} {display_unit}**")
 
 if st.sidebar.button("Log Generated Metrics Row"):
-    new_row = pd.DataFrame([{"Applied Voltage (V)": v_in, "Circuit Current (mA)": i_generated_ma}])
+    new_row = pd.DataFrame([{"Applied Voltage (V)": v_in, "Circuit Current": i_display, "Unit": display_unit}])
     
     if material == "Silicon (Si)":
         st.session_state['si_data'] = pd.concat([st.session_state['si_data'], new_row], ignore_index=True).drop_duplicates(subset=["Applied Voltage (V)"]).sort_values(by="Applied Voltage (V)")
     else:
         st.session_state['ge_data'] = pd.concat([st.session_state['ge_data'], new_row], ignore_index=True).drop_duplicates(subset=["Applied Voltage (V)"]).sort_values(by="Applied Voltage (V)")
         
-    log_user_action(st.session_state['student_id'], "Loop_Auto_Row_Added", f"{material} - {bias_mode}: V={v_in}, I={i_generated_ma} mA")
-    st.toast("Automated measurement logged!", icon="⚙️")
+    log_user_action(st.session_state['student_id'], "Loop_Auto_Row_Added", f"{material} - {bias_mode}: V={v_in}, I={i_display} {display_unit}")
+    st.toast(f"Logged value automatically in {display_unit}!", icon="⚙️")
 
 if st.sidebar.button("🚨 Clear Current Material Dataset"):
     if material == "Silicon (Si)":
-        st.session_state['si_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current (mA)"])
+        st.session_state['si_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current", "Unit"])
     else:
-        st.session_state['ge_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current (mA)"])
+        st.session_state['ge_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current", "Unit"])
     st.sidebar.warning(f"Cleared all entries for {material}")
     st.rerun()
 
@@ -166,24 +169,23 @@ if st.sidebar.button("🚨 Clear Current Material Dataset"):
 active_df = st.session_state['si_data'] if material == "Silicon (Si)" else st.session_state['ge_data']
 
 # --- MAIN SCREEN WORKSPACE ---
-col_graph, col_table = st.columns([2, 1])
+col_graph, col_table = st.columns([1, 1])
 
 with col_table:
     st.subheader(f"📋 Experimental Spreadsheet Log [{st.session_state['student_id']}]")
     st.markdown(f"**Active Material View:** `{material}`")
     
-    # Safely extract and format visible data tables strictly to 2 decimal places
+    # Robust dynamic key-safe mapper formatting numbers to 2 decimal points safely
     formatted_df = active_df.copy()
     if not formatted_df.empty:
-        # Determine active column names dynamically to avoid KeyErrors
         vol_col = [col for col in formatted_df.columns if "Volt" in col][0]
         cur_col = [col for col in formatted_df.columns if "Current" in col][0]
         
-        formatted_df[vol_col] = formatted_df[vol_col].map("{:.2f}".format)
-        formatted_df[cur_col] = formatted_df[cur_col].map("{:.2f}".format)
+        formatted_df[vol_col] = formatted_df[vol_col].map(lambda x: f"{float(x):.2f}" if pd.notnull(x) else x)
+        formatted_df[cur_col] = formatted_df[cur_col].map(lambda x: f"{float(x):.2f}" if pd.notnull(x) else x)
         
     st.dataframe(formatted_df, use_container_width=True, hide_index=True)
-    st.caption("ℹ️ *Physics Note: Values represent automated loops solved under a 500 Ω resistor matrix burden.*")
+    st.caption("ℹ️ *Ammeter Note: The spreadsheet logs values in µA or mA based on active load scale sizing.*")
 
 with col_graph:
     st.subheader(f"📊 Continuous Unified Curve Tracer: {material}")
@@ -191,35 +193,44 @@ with col_graph:
     fig = go.Figure()
     
     if not active_df.empty:
-        fwd_pts = active_df[active_df["Applied Voltage (V)"] >= 0]
-        rev_pts = active_df[active_df["Applied Voltage (V)"] < 0]
+        # For graphing consistency, normalize everything back to mA units dynamically
+        graph_df = active_df.copy()
+        normalized_currents = []
+        for _, row in graph_df.iterrows():
+            val = float(row["Circuit Current"])
+            unit = row["Unit"]
+            normalized_currents.append(val / 1000.0 if unit == "µA" else val)
+        graph_df["Normalized_mA"] = normalized_currents
+
+        fwd_pts = graph_df[graph_df["Applied Voltage (V)"] >= 0]
+        rev_pts = graph_df[graph_df["Applied Voltage (V)"] < 0]
         
         if not fwd_pts.empty:
             fig.add_trace(go.Scatter(
-                x=fwd_pts["Applied Voltage (V)"], y=fwd_pts["Circuit Current (mA)"],
+                x=fwd_pts["Applied Voltage (V)"], y=fwd_pts["Normalized_mA"],
                 mode='markers+lines', name="Forward Bias (mA)",
                 marker=dict(color='#00CC96', size=9),
                 line=dict(color='#00CC96', width=2)
             ))
         if not rev_pts.empty:
             fig.add_trace(go.Scatter(
-                x=rev_pts["Applied Voltage (V)"], y=rev_pts["Circuit Current (mA)"],
-                mode='markers+lines', name="Reverse Bias (mA)",
+                x=rev_pts["Applied Voltage (V)"], y=rev_pts["Normalized_mA"],
+                mode='markers+lines', name="Reverse Bias (Scaled to mA)",
                 marker=dict(color='#FF4B4B', size=9, symbol='square'),
                 line=dict(color='#FF4B4B', width=2, dash='dot')
             ))
             
-        x_min = min(active_df["Applied Voltage (V)"].min() - 2, -22)
-        x_max = max(active_df["Applied Voltage (V)"].max() + 2, 22)
-        y_min = min(active_df["Circuit Current (mA)"].min() - 5, -15)
-        y_max = max(active_df["Circuit Current (mA)"].max() + 5, 45)
+        x_min = min(graph_df["Applied Voltage (V)"].min() - 2, -22)
+        x_max = max(graph_df["Applied Voltage (V)"].max() + 2, 22)
+        y_min = min(graph_df["Normalized_mA"].min() - 2, -10)
+        y_max = max(graph_df["Normalized_mA"].max() + 5, 45)
     else:
-        x_min, x_max, y_min, y_max = -22, 22, -15, 45
-        st.info("💡 Coordinate canvas clear. Adjust the sidebar inputs and select 'Log Generated Metrics Row' to construct live curves.")
+        x_min, x_max, y_min, y_max = -22, 22, -10, 45
+        st.info("💡 Coordinate canvas clear. Adjust the sidebar inputs and log measurements to view curves.")
 
     fig.layout = go.Layout(
         xaxis=dict(title="Applied Loop Voltage (Volts, V)", range=[x_min, x_max], zeroline=True, zerolinecolor="white", gridcolor="rgba(128,128,128,0.2)"),
-        yaxis=dict(title="Circuit Current (Milliamperes, mA)", range=[y_min, y_max], zeroline=True, zerolinecolor="white", gridcolor="rgba(128,128,128,0.2)"),
+        yaxis=dict(title="Circuit Current (Standardized to mA)", range=[y_min, y_max], zeroline=True, zerolinecolor="white", gridcolor="rgba(128,128,128,0.2)"),
         template="plotly_dark",
         height=450,
         margin=dict(l=25, r=25, t=10, b=25)
@@ -291,6 +302,6 @@ if st.button("Log Out / Reset Lab Bench"):
     st.session_state['authenticated'] = False
     st.session_state['quiz_submitted'] = False
     st.session_state['saved_score'] = 0
-    st.session_state['si_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current (mA)"])
-    st.session_state['ge_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current (mA)"])
+    st.session_state['si_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current", "Unit"])
+    st.session_state['ge_data'] = pd.DataFrame(columns=["Applied Voltage (V)", "Circuit Current", "Unit"])
     st.rerun()
