@@ -172,11 +172,15 @@ with col_table:
     st.subheader(f"📋 Experimental Spreadsheet Log [{st.session_state['student_id']}]")
     st.markdown(f"**Active Material View:** `{material}`")
     
-    # Format visible data tables strictly to 2 decimal places
+    # Safely extract and format visible data tables strictly to 2 decimal places
     formatted_df = active_df.copy()
     if not formatted_df.empty:
-        formatted_df["Applied Voltage (V)"] = formatted_df["Applied Voltage (V)"].map("{:.2f}".format)
-        formatted_df["Circuit Current (mA)"] = formatted_df["Circuit Current (mA)"].map("{:.2f}".format)
+        # Determine active column names dynamically to avoid KeyErrors
+        vol_col = [col for col in formatted_df.columns if "Volt" in col][0]
+        cur_col = [col for col in formatted_df.columns if "Current" in col][0]
+        
+        formatted_df[vol_col] = formatted_df[vol_col].map("{:.2f}".format)
+        formatted_df[cur_col] = formatted_df[cur_col].map("{:.2f}".format)
         
     st.dataframe(formatted_df, use_container_width=True, hide_index=True)
     st.caption("ℹ️ *Physics Note: Values represent automated loops solved under a 500 Ω resistor matrix burden.*")
